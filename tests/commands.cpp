@@ -18,6 +18,8 @@ int main() {
         {"O", 0},
         {"R", 0},
         {"hjkl3i", 5},
+        {"\ni", 1},
+        {"d\ni", 2},
         {"diwi", 3},
         {"dawi", 3},
         {"d10iwA", 5},
@@ -57,6 +59,13 @@ int main() {
         {":keepp s/x/y/c\nna", 16},
         {":keepp echo 's/x/y/c'\na", 22},
         {":s/x/y/gc\nyinao", 14},
+        {":set number | %s/x/y/gc\nai", 25},
+        {":set tw=72 | set nu | s/x/y/c\nna", 31},
+        {":set titlestring=x\\|%s/x/y/gc\na", 30},
+        {":s/x/y/ | s/z/t/c\nai", 19},
+        {":s/x/y/c 1 | set nu\nyi", 21},
+        {":s/missing/y/ce\ni", 16},
+        {":s/x/y/ce\nai", 11},
     };
     for (const auto &[keys, restoreAt] : cases) {
         viescape::Commands commands;

@@ -20,15 +20,19 @@ private:
         GPrefix,
         ZPrefix,
         CommandLine,
+        UnknownSearch,
         ConfirmOnce,
         ConfirmMultiple,
         Suspended
     };
-    static State afterCommandLine(std::string_view line);
+    State afterCommandLine(std::string_view line);
+    State afterSubstitute(std::string_view &line, bool multipleLines);
     void editCommandLine(const fcitx::Key &key);
     State state_ = State::Normal;
     std::string commandLine_;
+    std::string::size_type cursor_ = 1;
     bool recalledSearch_ = false;
+    bool silentNoMatch_ = false;
     char operator_ = 0;
     bool motionCount_ = false;
     int count_ = 0;

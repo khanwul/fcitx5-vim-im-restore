@@ -9,6 +9,37 @@ bool contains(std::string_view chars, char c) {
     return chars.find(c) != std::string_view::npos;
 }
 
+bool skipToBar(std::string_view &line) {
+    // File names and :set values can escape a bar. A comment ends the line.
+    while (!line.empty()) {
+        const char c = line.front();
+        line.remove_prefix(1);
+        if (c == '|') {
+            return true;
+        }
+        if (c == '"') {
+            break;
+        }
+        if (c == '\\' && !line.empty()) {
+            line.remove_prefix(1);
+        }
+    }
+    return false;
+}
+
+bool takesSimpleArguments(std::string_view name, std::string_view args) {
+    if (name.size() >= 2 && (std::string_view("setlocal").starts_with(name) ||
+                             std::string_view("setglobal").starts_with(name))) {
+        return true;
+    }
+    // A :write or :read shell command owns the rest of its command line.
+    const auto pos = args.find_first_not_of(' ');
+    return !name.empty() &&
+           (std::string_view("write").starts_with(name) ||
+            std::string_view("read").starts_with(name)) &&
+           pos != std::string_view::npos && args[pos] != '!';
+}
+
 bool skipSubstituteField(std::string_view &line, char delimiter, bool pattern) {
     bool inClass = false;
     while (!line.empty()) {
@@ -52,6 +83,7 @@ Commands::State Commands::afterCommandLine(std::string_view line) {
     if (!line.starts_with(':')) {
         return State::Normal;
     }
+    State confirmation = State::Normal;
     bool multipleLines = false;
     for (;;) {
         // Skip the range, including marks such as '<,'>.
@@ -69,16 +101,37 @@ Commands::State Commands::afterCommandLine(std::string_view line) {
             0, line.find_first_not_of("abcdefghijklmnopqrstuvwxyz"));
         line.remove_prefix(name.size());
         if (!name.empty() && std::string_view("substitute").starts_with(name)) {
-            break;
+            const auto next = afterSubstitute(line, multipleLines);
+            if (next != State::Normal) {
+                if (confirmation != State::Normal) {
+                    // Either command might prompt, or both might.
+                    return State::Suspended;
+                }
+                confirmation = next;
+            }
+            if (!line.starts_with('|')) {
+                return confirmation;
+            }
+            line.remove_prefix(1);
+            multipleLines = false;
+            continue;
+        }
+        if (takesSimpleArguments(name, line) && skipToBar(line)) {
+            multipleLines = false;
+            continue;
         }
         if (!isCommandModifier(name)) {
-            return State::Normal;
+            return confirmation;
         }
         if (std::string_view("silent").starts_with(name) &&
             line.starts_with('!')) {
             line.remove_prefix(1);
         }
     }
+}
+
+Commands::State Commands::afterSubstitute(std::string_view &line,
+                                          bool multipleLines) {
     while (line.starts_with(' ')) {
         line.remove_prefix(1);
     }
@@ -93,16 +146,23 @@ Commands::State Commands::afterCommandLine(std::string_view line) {
         }
     }
     const auto flags = line.substr(0, line.find_first_not_of("&cegiInplr#"));
+    line.remove_prefix(flags.size());
+    while (line.starts_with(' ')) {
+        line.remove_prefix(1);
+    }
+    const auto count = line.substr(0, line.find_first_not_of("0123456789"));
+    if (!count.empty()) {
+        // A trailing count starts at the last address in the range.
+        multipleLines = count != "1";
+        line.remove_prefix(count.size());
+        while (line.starts_with(' ')) {
+            line.remove_prefix(1);
+        }
+    }
     if (!contains(flags, 'c') || contains(flags, 'n')) {
         return State::Normal;
     }
-    line.remove_prefix(flags.size());
-    const auto countStart = line.find_first_not_of(' ');
-    if (countStart != std::string_view::npos) {
-        // A trailing count starts at the last address in the range.
-        multipleLines =
-            line[countStart] != '1' || countStart != line.find_last_not_of(' ');
-    }
+    silentNoMatch_ = contains(flags, 'e');
     // With Vim's default 'nogdefault', at most one match per addressed
     // line is confirmed unless flags request or inherit a global replacement.
     return multipleLines || contains(flags, 'g') || contains(flags, '&')
@@ -113,6 +173,12 @@ Commands::State Commands::afterCommandLine(std::string_view line) {
 void Commands::editCommandLine(const fcitx::Key &key) {
     if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter)) {
         state_ = afterCommandLine(commandLine_);
+    } else if (key.check(FcitxKey_C, fcitx::KeyState::Ctrl)) {
+        state_ = State::Normal;
+    } else if (state_ == State::UnknownSearch) {
+        // Editing recalled text can leave an unknown suffix after the cursor.
+        // Enter and Ctrl+C still end the search.
+        return;
     } else if ((commandLine_.starts_with('/') ||
                 commandLine_.starts_with('?')) &&
                (key.check(FcitxKey_Up) || key.check(FcitxKey_Down) ||
@@ -120,20 +186,31 @@ void Commands::editCommandLine(const fcitx::Key &key) {
                 key.check(FcitxKey_N, fcitx::KeyState::Ctrl))) {
         // Vim owns the recalled text. Keep tracking the suffix typed after it.
         commandLine_.resize(1);
+        cursor_ = 1;
         recalledSearch_ = true;
         return;
+    } else if (key.check(FcitxKey_Left)) {
+        if (cursor_ > 1) {
+            --cursor_;
+        } else if (recalledSearch_) {
+            state_ = State::UnknownSearch;
+        }
+        return;
+    } else if (key.check(FcitxKey_Right)) {
+        cursor_ = std::min(cursor_ + 1, commandLine_.size());
+        return;
     } else if (key.check(FcitxKey_U, fcitx::KeyState::Ctrl)) {
-        // All tracked edits leave the cursor at the end of the command line.
-        commandLine_.resize(1);
+        commandLine_.erase(1, cursor_ - 1);
+        cursor_ = 1;
         recalledSearch_ = false;
         return;
     } else if (key.check(FcitxKey_BackSpace) ||
                key.check(FcitxKey_H, fcitx::KeyState::Ctrl)) {
-        if (commandLine_.size() > 1) {
-            commandLine_.pop_back();
+        if (cursor_ > 1) {
+            commandLine_.erase(--cursor_, 1);
             return;
         }
-        if (recalledSearch_) {
+        if (commandLine_.size() > 1 || recalledSearch_) {
             return;
         }
         state_ = State::Normal;
@@ -141,7 +218,8 @@ void Commands::editCommandLine(const fcitx::Key &key) {
         const auto ch = fcitx::Key::keySymToUnicode(key.sym());
         if (!key.states() && ch >= ' ' && ch != 127) {
             // One byte per typed character keeps Backspace accurate for UTF-8.
-            commandLine_ += ch < 128 ? static_cast<char>(ch) : '\x7f';
+            commandLine_.insert(cursor_++, 1,
+                                ch < 128 ? static_cast<char>(ch) : '\x7f');
             return;
         }
         // History, completion and quoted keys can replace unseen text.
@@ -155,7 +233,7 @@ bool Commands::entersInsert(const fcitx::Key &key) {
     if (key.isModifier() || state_ == State::Suspended) {
         return false;
     }
-    if (state_ == State::CommandLine) {
+    if (state_ == State::CommandLine || state_ == State::UnknownSearch) {
         editCommandLine(key);
         return false;
     }
@@ -169,6 +247,13 @@ bool Commands::entersInsert(const fcitx::Key &key) {
     }
     const int count = std::exchange(count_, 0);
     if (state_ == State::ConfirmOnce || state_ == State::ConfirmMultiple) {
+        // With /ce a failed search silently leaves Vim in Normal. Prefer
+        // an explicit Insert command over an invalid first prompt response.
+        if (std::exchange(silentNoMatch_, false) && !key.states() &&
+            contains("ioIAOR", c)) {
+            state_ = State::Normal;
+            return true;
+        }
         if (!key.states() &&
             contains(state_ == State::ConfirmOnce ? "aqlyn" : "aql", c)) {
             state_ = State::Normal;
@@ -184,6 +269,7 @@ bool Commands::entersInsert(const fcitx::Key &key) {
     }
     if (state_ == State::Register && c == '=') {
         commandLine_ = "=";
+        cursor_ = 1;
         state_ = State::CommandLine;
         return false;
     }
@@ -211,17 +297,20 @@ bool Commands::entersInsert(const fcitx::Key &key) {
             }
         }
         state_ = State::CommandLine;
+        cursor_ = commandLine_.size();
         return false;
     }
     constexpr std::string_view motions = "hjklwWbBeE0^$G|%(){};,+- ";
+    const bool motion = contains(motions, c) || sym == FcitxKey_Return ||
+                        sym == FcitxKey_KP_Enter;
     if (state_ == State::Operator) {
         if ((c >= '1' && c <= '9') || (motionCount_ && c == '0')) {
             motionCount_ = true;
         } else if (contains("iafFtT'`", c)) {
             state_ = State::Argument;
         } else {
-            state_ = c == operator_ || contains(motions, c) ? State::Normal
-                                                            : State::Suspended;
+            state_ =
+                c == operator_ || motion ? State::Normal : State::Suspended;
         }
         return false;
     }
@@ -240,7 +329,7 @@ bool Commands::entersInsert(const fcitx::Key &key) {
         state_ = State::GPrefix;
     } else if (c == 'z') {
         state_ = State::ZPrefix;
-    } else if (!contains(motions, c) && !contains("xXpPuUJDY~.nN*", c) &&
+    } else if (!motion && !contains("xXpPuUJDY~.nN*", c) &&
                sym != FcitxKey_Left && sym != FcitxKey_Right &&
                sym != FcitxKey_Up && sym != FcitxKey_Down) {
         // Includes Visual, change commands, macros, and unknown sequences.

@@ -24,6 +24,12 @@ struct ContextState final : InputContextProperty {
     std::string saved;
     viescape::Commands commands;
     char pendingCommit = 0;
+    // A switch invalidates pending restores in contexts sharing its IM state.
+    // The saved IM and the command sequence belong to their original context.
+    bool needCopy() const override { return true; }
+    void copyTo(InputContextProperty *other) override {
+        static_cast<ContextState *>(other)->clear();
+    }
     void clear() {
         saved.clear();
         commands = {};
@@ -52,7 +58,9 @@ public:
         switched_ =
             instance_.watchEvent<EventType::InputContextSwitchInputMethod>(
                 EventWatcherPhase::PostInputMethod, [this](const auto &event) {
-                    event.inputContext()->propertyFor(&factory_)->clear();
+                    auto *ic = event.inputContext();
+                    ic->propertyFor(&factory_)->clear();
+                    ic->updateProperty(&factory_);
                 });
     }
 
@@ -97,11 +105,12 @@ private:
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
         state->pendingCommit = 0;
-        if (event.isRelease() || event.accepted() || event.filtered() ||
-            !ic->hasFocus() || excluded(ic)) {
+        if (event.isRelease() || event.accepted() || !ic->hasFocus() ||
+            excluded(ic)) {
             return;
         }
-        // This signal runs after the active engine's keyEvent and filterKey.
+        // filterKey can stop dispatch with filter() while still passing the
+        // Escape to the client. Only accept() marks it as consumed.
         const auto key = event.key();
         if (key.check(FcitxKey_Escape)) {
             state->commands = {};
@@ -117,7 +126,7 @@ private:
             if (instance_.inputMethod(ic) == english) {
                 state->saved = current;
             }
-        } else if (!state->saved.empty()) {
+        } else if (!event.filtered() && !state->saved.empty()) {
             if (instance_.inputMethod(ic) != *settings_.english) {
                 state->clear();
             } else if (state->commands.entersInsert(key)) {

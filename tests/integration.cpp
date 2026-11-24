@@ -4,8 +4,10 @@
 #include <fcitx-utils/standardpath.h>
 #endif
 #include <fcitx-utils/testing.h>
+#include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontextmanager.h>
+#include <fcitx/inputmethodengine.h>
 #include <fcitx/inputmethodgroup.h>
 #include <fcitx/inputmethodmanager.h>
 #include <fcitx/inputpanel.h>
@@ -18,6 +20,21 @@
 
 namespace {
 using namespace fcitx;
+// TestIM exposes its keyEvent handler. This engine exercises the later
+// filterKey hook, just before Fcitx publishes KeyEventResult.
+class EscapeFilter final : public InputMethodEngine {
+    void keyEvent(const InputMethodEntry &, KeyEvent &) override {}
+    void filterKey(const InputMethodEntry &, KeyEvent &event) override {
+        if (event.key().check(FcitxKey_Escape)) {
+            event.filter();
+        }
+    }
+};
+
+class EscapeFilterFactory final : public AddonFactory {
+    AddonInstance *create(AddonManager *) override { return new EscapeFilter; }
+};
+
 void require(bool ok, const std::string &message) {
     if (!ok) {
         throw std::runtime_error(message);
@@ -93,6 +110,10 @@ int run(const std::string &scenario, Instance &instance,
         require(methods.entry(composition.inputMethod),
                 "unknown input method: " + composition.inputMethod);
         group.inputMethodList().emplace_back(composition.inputMethod);
+    } else if (scenario == "filtered-escape") {
+        require(manager.addon("escapefilter", true),
+                "could not load Escape filter");
+        group.inputMethodList().emplace_back("test-filter");
     }
     group.setDefaultInputMethod("test-primary");
     methods.setGroup(std::move(group));
@@ -148,6 +169,7 @@ int run(const std::string &scenario, Instance &instance,
                 "Ctrl+D was consumed");
         client.pass(FcitxKey_z);
         client.pass(FcitxKey_z);
+        client.pass(FcitxKey_Return);
         client.expect("keyboard-us");
         client.pass(FcitxKey_i);
         client.expect("test-secondary");
@@ -187,6 +209,49 @@ int run(const std::string &scenario, Instance &instance,
         client.pass(FcitxKey_Return);
         client.pass(FcitxKey_i);
         client.expect("test-primary");
+    } else if (scenario == "edited-search-restore") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass("/ab");
+        client.pass(FcitxKey_Left);
+        client.pass(FcitxKey_i);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass("?ab");
+        require(!client.key(Key(FcitxKey_c, KeyState::Ctrl)),
+                "Ctrl+C was consumed");
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+    } else if (scenario == "shared-override") {
+        for (auto policy :
+             {PropertyPropagatePolicy::All, PropertyPropagatePolicy::Program}) {
+            instance.inputContextManager().setPropertyPropagatePolicy(policy);
+            client.select("test-primary");
+            client.pass(FcitxKey_Escape);
+            client.expect("keyboard-us");
+            client.context()->focusOut();
+            Client other(instance, *frontend,
+                         policy == PropertyPropagatePolicy::All ? "browser"
+                                                                : "editor");
+            other.select("test-secondary");
+            other.select("keyboard-us");
+            other.context()->focusOut();
+            client.pass(FcitxKey_i);
+            client.expect("keyboard-us");
+        }
+        // Program sharing still isolates a different program's manual switch.
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.context()->focusOut();
+        Client browser(instance, *frontend, "browser");
+        browser.select("test-secondary");
+        browser.select("keyboard-us");
+        browser.context()->focusOut();
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
     } else if (scenario == "single-substitution-restore") {
         client.select("test-primary");
         for (auto reply : {FcitxKey_y, FcitxKey_n}) {
@@ -201,12 +266,18 @@ int run(const std::string &scenario, Instance &instance,
     } else if (scenario == "modified-substitution-confirm") {
         client.select("test-primary");
         client.pass(FcitxKey_Escape);
-        client.pass(":keeppatterns %s/x/y/gc");
+        client.pass(":set number | keeppatterns %s/x/y/gc");
         client.pass(FcitxKey_Return);
         client.pass(FcitxKey_a);
         client.expect("keyboard-us");
         client.pass(FcitxKey_i);
         client.expect("test-primary");
+    } else if (scenario == "filtered-escape") {
+        client.select("test-filter");
+        client.pass(FcitxKey_Escape);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_i);
+        client.expect("test-filter");
     } else if (scenario == "consumed-escape") {
         bool candidateOpen = true;
         engine->call<ITestIM::setHandler>([&](const auto &, KeyEvent &event) {
@@ -308,6 +379,9 @@ int main(int argc, char **argv) {
         char program[] = "test-integration";
         char disabled[] = "--disable=all";
         std::string enabled = "--enable=testfrontend,testim,viescape";
+        if (std::string_view(argv[1]) == "filtered-escape") {
+            enabled += ",escapefilter";
+        }
         CompositionCase composition;
         if (argc == 9) {
             composition = {argv[5], argv[6], argv[7], argv[8]};
@@ -316,8 +390,10 @@ int main(int argc, char **argv) {
             enabled += "," + composition.addon;
         }
         char *args[] = {program, disabled, enabled.data(), nullptr};
+        EscapeFilterFactory filterFactory;
+        StaticAddonRegistry registry{{"escapefilter", &filterFactory}};
         Instance instance(3, args);
-        instance.addonManager().registerDefaultLoader(nullptr);
+        instance.addonManager().registerDefaultLoader(&registry);
         instance.initialize();
         return run(argv[1], instance, composition);
     } catch (const std::exception &e) {

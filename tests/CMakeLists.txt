@@ -17,10 +17,15 @@ foreach(role primary secondary command)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/inputmethod/test-${role}.conf"
         "[InputMethod]\nName=Test ${role}\nLangCode=und\nAddon=testim\n")
 endforeach()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/addon/escapefilter.conf"
+    "[Addon]\nName=Test Escape filter\nType=StaticLibrary\nLibrary=escapefilter\nCategory=InputMethod\nOnDemand=True\n")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/inputmethod/test-filter.conf"
+    "[InputMethod]\nName=Test Escape filter\nLangCode=und\nAddon=escapefilter\n")
 foreach(scenario IN ITEMS switching translated-command scroll-restore
                           command-line-restore search-history-restore
                           single-substitution-restore modified-substitution-confirm
-                          consumed-escape overrides contexts)
+                          consumed-escape overrides contexts edited-search-restore
+                          shared-override filtered-escape)
     add_test(NAME "frontend-${scenario}" COMMAND test-integration
              "${scenario}" "$<TARGET_FILE_DIR:viescape>"
              "${PROJECT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
