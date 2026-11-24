@@ -49,6 +49,14 @@ int main() {
         {"3:\bi\no", 5},
         {"\"=input\npi", 9},
         {":s /[x/]/z/c\nao", 14},
+        {":s/x/y/c\nydiwi", 13},
+        {":%s/x/y/c\nynai", 13},
+        {":s/x/y/c 2\nynai", 14},
+        {":%s/x/y/c 1\nna", 13},
+        {":sil! keepj keepp %s/x/y/gc\nyiao", 31},
+        {":keepp s/x/y/c\nna", 16},
+        {":keepp echo 's/x/y/c'\na", 22},
+        {":s/x/y/gc\nyinao", 14},
     };
     for (const auto &[keys, restoreAt] : cases) {
         viescape::Commands commands;

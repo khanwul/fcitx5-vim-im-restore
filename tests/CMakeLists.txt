@@ -18,7 +18,9 @@ foreach(role primary secondary command)
         "[InputMethod]\nName=Test ${role}\nLangCode=und\nAddon=testim\n")
 endforeach()
 foreach(scenario IN ITEMS switching translated-command scroll-restore
-                          command-line-restore consumed-escape overrides contexts)
+                          command-line-restore search-history-restore
+                          single-substitution-restore modified-substitution-confirm
+                          consumed-escape overrides contexts)
     add_test(NAME "frontend-${scenario}" COMMAND test-integration
              "${scenario}" "$<TARGET_FILE_DIR:viescape>"
              "${PROJECT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")

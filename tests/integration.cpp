@@ -51,6 +51,11 @@ public:
     void pass(KeySym sym) {
         require(!key(sym), "client did not receive " + Key(sym).toString());
     }
+    void pass(std::string_view text) {
+        for (const char c : text) {
+            pass(static_cast<KeySym>(c));
+        }
+    }
     InputContext *context() const { return ic_; }
 
 private:
@@ -154,9 +159,49 @@ int run(const std::string &scenario, Instance &instance,
         client.pass(FcitxKey_i);
         client.expect("test-primary");
         client.pass(FcitxKey_Escape);
-        for (char c : std::string_view(":%s/x/y/gc")) {
-            client.pass(static_cast<KeySym>(c));
+        client.pass(":%s/x/y/gc");
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_a);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+    } else if (scenario == "search-history-restore") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass("/x");
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_slash);
+        client.pass(FcitxKey_Up);
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass(FcitxKey_question);
+        client.pass(FcitxKey_Up);
+        client.pass(FcitxKey_BackSpace);
+        client.pass(FcitxKey_i);
+        client.expect("keyboard-us");
+        require(!client.key(Key(FcitxKey_u, KeyState::Ctrl)),
+                "Ctrl+U was consumed");
+        client.pass(FcitxKey_x);
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+    } else if (scenario == "single-substitution-restore") {
+        client.select("test-primary");
+        for (auto reply : {FcitxKey_y, FcitxKey_n}) {
+            client.pass(FcitxKey_Escape);
+            client.pass(":s/x/y/c");
+            client.pass(FcitxKey_Return);
+            client.pass(reply);
+            client.expect("keyboard-us");
+            client.pass(FcitxKey_i);
+            client.expect("test-primary");
         }
+    } else if (scenario == "modified-substitution-confirm") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass(":keeppatterns %s/x/y/gc");
         client.pass(FcitxKey_Return);
         client.pass(FcitxKey_a);
         client.expect("keyboard-us");

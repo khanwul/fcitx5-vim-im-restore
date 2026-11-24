@@ -26,26 +26,59 @@ bool skipSubstituteField(std::string_view &line, char delimiter, bool pattern) {
     return false;
 }
 
-bool confirmsSubstitution(std::string_view line) {
+bool isCommandModifier(std::string_view name) {
+    struct Modifier {
+        std::string_view name;
+        size_t minLength;
+    };
+    static constexpr Modifier modifiers[] = {
+        {"aboveleft", 3},  {"belowright", 3},   {"botright", 2},
+        {"browse", 3},     {"confirm", 4},      {"hide", 3},
+        {"horizontal", 3}, {"keepalt", 5},      {"keepjumps", 5},
+        {"keepmarks", 3},  {"keeppatterns", 5}, {"leftabove", 5},
+        {"lockmarks", 3},  {"noautocmd", 3},    {"noswapfile", 3},
+        {"rightbelow", 6}, {"sandbox", 3},      {"silent", 3},
+        {"tab", 3},        {"topleft", 2},      {"unsilent", 3},
+        {"verbose", 4},    {"vertical", 4},
+    };
+    return std::ranges::any_of(modifiers, [name](const Modifier &modifier) {
+        return name.size() >= modifier.minLength &&
+               modifier.name.starts_with(name);
+    });
+}
+} // namespace
+
+Commands::State Commands::afterCommandLine(std::string_view line) {
     if (!line.starts_with(':')) {
-        return false;
+        return State::Normal;
     }
-    // Skip the range, including marks such as '<,'>.
-    while (!line.empty()) {
-        if (line.starts_with('\'') && line.size() >= 2) {
-            line.remove_prefix(2);
-        } else if (contains(": %.$0123456789,;+-", line.front())) {
-            line.remove_prefix(1);
-        } else {
+    bool multipleLines = false;
+    for (;;) {
+        // Skip the range, including marks such as '<,'>.
+        while (!line.empty()) {
+            if (line.starts_with('\'') && line.size() >= 2) {
+                line.remove_prefix(2);
+            } else if (contains(": %.$0123456789,;+-", line.front())) {
+                multipleLines |= contains("%,;", line.front());
+                line.remove_prefix(1);
+            } else {
+                break;
+            }
+        }
+        const auto name = line.substr(
+            0, line.find_first_not_of("abcdefghijklmnopqrstuvwxyz"));
+        line.remove_prefix(name.size());
+        if (!name.empty() && std::string_view("substitute").starts_with(name)) {
             break;
         }
+        if (!isCommandModifier(name)) {
+            return State::Normal;
+        }
+        if (std::string_view("silent").starts_with(name) &&
+            line.starts_with('!')) {
+            line.remove_prefix(1);
+        }
     }
-    const auto name =
-        line.substr(0, line.find_first_not_of("abcdefghijklmnopqrstuvwxyz"));
-    if (name.empty() || !std::string_view("substitute").starts_with(name)) {
-        return false;
-    }
-    line.remove_prefix(name.size());
     while (line.starts_with(' ')) {
         line.remove_prefix(1);
     }
@@ -56,22 +89,51 @@ bool confirmsSubstitution(std::string_view line) {
         line.remove_prefix(1);
         if (!skipSubstituteField(line, delimiter, true) ||
             !skipSubstituteField(line, delimiter, false)) {
-            return false;
+            return State::Normal;
         }
     }
     const auto flags = line.substr(0, line.find_first_not_of("&cegiInplr#"));
-    return contains(flags, 'c') && !contains(flags, 'n');
+    if (!contains(flags, 'c') || contains(flags, 'n')) {
+        return State::Normal;
+    }
+    line.remove_prefix(flags.size());
+    const auto countStart = line.find_first_not_of(' ');
+    if (countStart != std::string_view::npos) {
+        // A trailing count starts at the last address in the range.
+        multipleLines =
+            line[countStart] != '1' || countStart != line.find_last_not_of(' ');
+    }
+    // With Vim's default 'nogdefault', at most one match per addressed
+    // line is confirmed unless flags request or inherit a global replacement.
+    return multipleLines || contains(flags, 'g') || contains(flags, '&')
+               ? State::ConfirmMultiple
+               : State::ConfirmOnce;
 }
-} // namespace
 
 void Commands::editCommandLine(const fcitx::Key &key) {
     if (key.check(FcitxKey_Return) || key.check(FcitxKey_KP_Enter)) {
-        state_ = confirmsSubstitution(commandLine_) ? State::SubstituteConfirm
-                                                    : State::Normal;
+        state_ = afterCommandLine(commandLine_);
+    } else if ((commandLine_.starts_with('/') ||
+                commandLine_.starts_with('?')) &&
+               (key.check(FcitxKey_Up) || key.check(FcitxKey_Down) ||
+                key.check(FcitxKey_P, fcitx::KeyState::Ctrl) ||
+                key.check(FcitxKey_N, fcitx::KeyState::Ctrl))) {
+        // Vim owns the recalled text. Keep tracking the suffix typed after it.
+        commandLine_.resize(1);
+        recalledSearch_ = true;
+        return;
+    } else if (key.check(FcitxKey_U, fcitx::KeyState::Ctrl)) {
+        // All tracked edits leave the cursor at the end of the command line.
+        commandLine_.resize(1);
+        recalledSearch_ = false;
+        return;
     } else if (key.check(FcitxKey_BackSpace) ||
                key.check(FcitxKey_H, fcitx::KeyState::Ctrl)) {
         if (commandLine_.size() > 1) {
             commandLine_.pop_back();
+            return;
+        }
+        if (recalledSearch_) {
             return;
         }
         state_ = State::Normal;
@@ -86,6 +148,7 @@ void Commands::editCommandLine(const fcitx::Key &key) {
         state_ = State::Suspended;
     }
     commandLine_.clear();
+    recalledSearch_ = false;
 }
 
 bool Commands::entersInsert(const fcitx::Key &key) {
@@ -105,8 +168,9 @@ bool Commands::entersInsert(const fcitx::Key &key) {
         return false;
     }
     const int count = std::exchange(count_, 0);
-    if (state_ == State::SubstituteConfirm) {
-        if (!key.states() && contains("aql", c)) {
+    if (state_ == State::ConfirmOnce || state_ == State::ConfirmMultiple) {
+        if (!key.states() &&
+            contains(state_ == State::ConfirmOnce ? "aqlyn" : "aql", c)) {
             state_ = State::Normal;
         }
         return false;

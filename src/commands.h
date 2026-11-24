@@ -2,6 +2,7 @@
 
 #include <fcitx-utils/key.h>
 #include <string>
+#include <string_view>
 
 namespace viescape {
 
@@ -19,12 +20,15 @@ private:
         GPrefix,
         ZPrefix,
         CommandLine,
-        SubstituteConfirm,
+        ConfirmOnce,
+        ConfirmMultiple,
         Suspended
     };
+    static State afterCommandLine(std::string_view line);
     void editCommandLine(const fcitx::Key &key);
     State state_ = State::Normal;
     std::string commandLine_;
+    bool recalledSearch_ = false;
     char operator_ = 0;
     bool motionCount_ = false;
     int count_ = 0;
