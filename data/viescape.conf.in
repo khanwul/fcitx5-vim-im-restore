@@ -1,0 +1,12 @@
+[Addon]
+Name=Vim Input Method Restore
+Comment=Save and restore the input method across Vim Insert mode changes
+Type=SharedLibrary
+Library=libviescape
+Category=Module
+Version=@PROJECT_VERSION@
+OnDemand=False
+Configurable=True
+
+[Addon/Dependencies]
+0=core:5.1.13

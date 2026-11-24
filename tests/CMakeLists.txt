@@ -1,0 +1,31 @@
+add_executable(test-commands commands.cpp ../src/commands.cpp)
+target_include_directories(test-commands PRIVATE ../src)
+target_compile_features(test-commands PRIVATE cxx_std_20)
+target_link_libraries(test-commands PRIVATE Fcitx5::Utils)
+add_test(NAME command-sequences COMMAND test-commands)
+
+find_package(Fcitx5ModuleTestFrontend REQUIRED)
+find_package(Fcitx5ModuleTestIM REQUIRED)
+add_executable(test-integration integration.cpp)
+target_compile_features(test-integration PRIVATE cxx_std_20)
+target_link_libraries(test-integration PRIVATE Fcitx5::Core
+    Fcitx5::Module::TestFrontend Fcitx5::Module::TestIM)
+add_dependencies(test-integration viescape)
+
+# IM identities backed by Fcitx's controllable testing engine.
+foreach(role primary secondary command)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/inputmethod/test-${role}.conf"
+        "[InputMethod]\nName=Test ${role}\nLangCode=und\nAddon=testim\n")
+endforeach()
+foreach(scenario IN ITEMS switching consumed-escape overrides contexts)
+    add_test(NAME "frontend-${scenario}" COMMAND test-integration
+             "${scenario}" "$<TARGET_FILE_DIR:viescape>"
+             "${PROJECT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+endforeach()
+set(COMPOSITION_TEST_CASE "" CACHE STRING
+    "Optional composition test (addon ID;input method ID;ASCII keystrokes;expected text)")
+if(COMPOSITION_TEST_CASE)
+    add_test(NAME frontend-composition COMMAND test-integration composition
+             "$<TARGET_FILE_DIR:viescape>" "${PROJECT_BINARY_DIR}"
+             "${CMAKE_CURRENT_BINARY_DIR}" ${COMPOSITION_TEST_CASE})
+endif()

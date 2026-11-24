@@ -1,0 +1,240 @@
+#if __has_include(<fcitx-utils/standardpaths.h>)
+#include <fcitx-utils/standardpaths.h>
+#else
+#include <fcitx-utils/standardpath.h>
+#endif
+#include <fcitx-utils/testing.h>
+#include <fcitx/addonmanager.h>
+#include <fcitx/inputcontextmanager.h>
+#include <fcitx/inputmethodgroup.h>
+#include <fcitx/inputmethodmanager.h>
+#include <fcitx/inputpanel.h>
+#include <fcitx/instance.h>
+#include <iostream>
+#include <stdexcept>
+#include <testfrontend_public.h>
+#include <testim_public.h>
+
+namespace {
+using namespace fcitx;
+void require(bool ok, const std::string &message) {
+    if (!ok) {
+        throw std::runtime_error(message);
+    }
+}
+
+class Client {
+public:
+    Client(Instance &instance, AddonInstance &frontend,
+           const std::string &program)
+        : instance_(instance), frontend_(frontend),
+          uuid_(frontend.call<ITestFrontend::createInputContext>(program)),
+          ic_(instance.inputContextManager().findByUUID(uuid_)) {
+        ic_->focusIn();
+    }
+    ~Client() { frontend_.call<ITestFrontend::destroyInputContext>(uuid_); }
+    void select(const std::string &im) {
+        instance_.setCurrentInputMethod(ic_, im, true);
+        expect(im);
+    }
+    void expect(const std::string &im) const {
+        const auto actual = instance_.inputMethod(ic_);
+        require(actual == im, "expected IM " + im + ", got " + actual);
+    }
+    bool key(KeySym sym, bool release = false) {
+        return frontend_.call<ITestFrontend::sendKeyEvent>(uuid_, Key(sym),
+                                                           release);
+    }
+    void pass(KeySym sym) {
+        require(!key(sym), "client did not receive " + Key(sym).toString());
+    }
+    InputContext *context() const { return ic_; }
+
+private:
+    Instance &instance_;
+    AddonInstance &frontend_;
+    ICUUID uuid_;
+    InputContext *ic_;
+};
+
+struct CompositionCase {
+    std::string addon;
+    std::string inputMethod;
+    std::string keys;
+    std::string text;
+};
+
+int run(const std::string &scenario, Instance &instance,
+        const CompositionCase &composition) {
+    auto &manager = instance.addonManager();
+    auto *addon = manager.addon("viescape");
+    auto *frontend = manager.addon("testfrontend");
+    auto *engine = manager.addon("testim");
+    require(addon && frontend && engine,
+            "could not load the addon and test modules");
+    auto &methods = instance.inputMethodManager();
+    InputMethodGroup group(methods.currentGroup().name());
+    group.setDefaultLayout("us");
+    for (const char *name :
+         {"keyboard-us", "test-primary", "test-secondary", "test-command"}) {
+        group.inputMethodList().emplace_back(name);
+    }
+    if (scenario == "composition") {
+        require(manager.addon(composition.addon, true),
+                "could not load the requested engine: " + composition.addon);
+        require(methods.entry(composition.inputMethod),
+                "unknown input method: " + composition.inputMethod);
+        group.inputMethodList().emplace_back(composition.inputMethod);
+    }
+    group.setDefaultInputMethod("test-primary");
+    methods.setGroup(std::move(group));
+    Client client(instance, *frontend, "editor");
+
+    if (scenario == "switching") {
+        // Count both ways a frontend can get a command: an unconsumed
+        // original event (pass) and any additional synthetic forward.
+        unsigned forwards = 0;
+        auto watch = instance.watchEvent<EventType::InputContextForwardKey>(
+            EventWatcherPhase::PostInputMethod,
+            [&](const auto &) { ++forwards; });
+        std::string received;
+        engine->call<ITestIM::setHandler>(
+            [&](const InputMethodEntry &entry, KeyEvent &event) {
+                if (!event.isRelease() && event.key().check(FcitxKey_r)) {
+                    received = entry.uniqueName();
+                    event.filterAndAccept();
+                }
+            });
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_Escape);
+        for (auto sym : {FcitxKey_h, FcitxKey_d, FcitxKey_i, FcitxKey_w,
+                         FcitxKey_f, FcitxKey_a}) {
+            client.pass(sym);
+            client.expect("keyboard-us");
+        }
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+        require(client.key(FcitxKey_r) && received == "test-primary",
+                "the first Insert keystroke missed the restored engine");
+        require(forwards == 0, "duplicate command event forwarded");
+        engine->call<ITestIM::setHandler>(nullptr);
+    } else if (scenario == "consumed-escape") {
+        bool candidateOpen = true;
+        engine->call<ITestIM::setHandler>([&](const auto &, KeyEvent &event) {
+            if (candidateOpen && event.key().check(FcitxKey_Escape) &&
+                !event.isRelease()) {
+                candidateOpen = false;
+                event.filterAndAccept();
+            }
+        });
+        client.select("test-secondary");
+        require(client.key(FcitxKey_Escape),
+                "candidate should consume the first Escape");
+        client.expect("test-secondary");
+        client.key(FcitxKey_Escape, true);
+        client.expect("test-secondary");
+        client.pass(FcitxKey_Escape);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_A);
+        client.expect("test-secondary");
+        engine->call<ITestIM::setHandler>(nullptr);
+    } else if (scenario == "overrides") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.select("test-secondary");
+        client.select("keyboard-us");
+        client.pass(FcitxKey_i);
+        client.expect("keyboard-us");
+        RawConfig config;
+        config["EnglishInputMethod"] = "test-command";
+        config["ExcludedPrograms/0"] = "browser";
+        addon->setConfig(config);
+        client.select("test-secondary");
+        client.pass(FcitxKey_Escape);
+        client.expect("test-command");
+        client.pass(FcitxKey_o);
+        client.expect("test-secondary");
+        Client excluded(instance, *frontend, "browser");
+        excluded.select("test-primary");
+        excluded.pass(FcitxKey_Escape);
+        excluded.expect("test-primary");
+        config["EnglishInputMethod"] = "missing";
+        addon->setConfig(config);
+        client.select("test-secondary");
+        client.pass(FcitxKey_Escape);
+        client.expect("test-secondary");
+    } else if (scenario == "contexts") {
+        instance.inputContextManager().setPropertyPropagatePolicy(
+            PropertyPropagatePolicy::No);
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.context()->focusOut();
+        Client other(instance, *frontend, "editor");
+        other.select("test-secondary");
+        other.pass(FcitxKey_Escape);
+        other.context()->focusOut();
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+        client.context()->focusOut();
+        other.pass(FcitxKey_R);
+        other.expect("test-secondary");
+    } else if (scenario == "composition") {
+        auto composeAndExit = [&] {
+            client.expect(composition.inputMethod);
+            frontend->call<ITestFrontend::pushCommitExpectation>(
+                composition.text);
+            for (unsigned char key : composition.keys) {
+                require(client.key(static_cast<KeySym>(key)),
+                        "the engine did not handle a composition keystroke");
+            }
+            client.pass(FcitxKey_Escape);
+            client.expect("keyboard-us");
+        };
+        client.select(composition.inputMethod);
+        composeAndExit();
+        client.pass(FcitxKey_h);
+        client.pass(FcitxKey_i);
+        composeAndExit();
+    } else {
+        throw std::runtime_error("unknown test scenario " + scenario);
+    }
+    return 0;
+}
+} // namespace
+
+int main(int argc, char **argv) {
+    if (argc < 2 || argc != (std::string(argv[1]) == "composition" ? 9 : 5)) {
+        std::cerr << "usage: test-integration SCENARIO MODULE_DIR METADATA_DIR "
+                     "FIXTURE_DIR [ADDON IM KEYS TEXT]\n";
+        return 1;
+    }
+    try {
+        using namespace fcitx;
+#if __has_include(<fcitx-utils/standardpaths.h>)
+        auto dataDir = StandardPaths::fcitxPath("pkgdatadir").string();
+#else
+        auto dataDir = StandardPath::fcitxPath("pkgdatadir");
+#endif
+        setupTestingEnvironment("", {argv[2]}, {argv[3], argv[4], dataDir});
+        char program[] = "test-integration";
+        char disabled[] = "--disable=all";
+        std::string enabled = "--enable=testfrontend,testim,viescape";
+        CompositionCase composition;
+        if (argc == 9) {
+            composition = {argv[5], argv[6], argv[7], argv[8]};
+            require(!composition.keys.empty() && !composition.text.empty(),
+                    "composition keystrokes and expected text are required");
+            enabled += "," + composition.addon;
+        }
+        char *args[] = {program, disabled, enabled.data(), nullptr};
+        Instance instance(3, args);
+        instance.addonManager().registerDefaultLoader(nullptr);
+        instance.initialize();
+        return run(argv[1], instance, composition);
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << '\n';
+        return 1;
+    }
+}
