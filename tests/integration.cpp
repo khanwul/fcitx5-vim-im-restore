@@ -12,6 +12,7 @@
 #include <fcitx/instance.h>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <testfrontend_public.h>
 #include <testim_public.h>
 
@@ -42,8 +43,10 @@ public:
         require(actual == im, "expected IM " + im + ", got " + actual);
     }
     bool key(KeySym sym, bool release = false) {
-        return frontend_.call<ITestFrontend::sendKeyEvent>(uuid_, Key(sym),
-                                                           release);
+        return key(Key(sym), release);
+    }
+    bool key(const Key &key, bool release = false) {
+        return frontend_.call<ITestFrontend::sendKeyEvent>(uuid_, key, release);
     }
     void pass(KeySym sym) {
         require(!key(sym), "client did not receive " + Key(sym).toString());
@@ -74,7 +77,7 @@ int run(const std::string &scenario, Instance &instance,
             "could not load the addon and test modules");
     auto &methods = instance.inputMethodManager();
     InputMethodGroup group(methods.currentGroup().name());
-    group.setDefaultLayout("us");
+    group.setDefaultLayout(scenario == "translated-command" ? "fr" : "us");
     for (const char *name :
          {"keyboard-us", "test-primary", "test-secondary", "test-command"}) {
         group.inputMethodList().emplace_back(name);
@@ -120,6 +123,45 @@ int run(const std::string &scenario, Instance &instance,
                 "the first Insert keystroke missed the restored engine");
         require(forwards == 0, "duplicate command event forwarded");
         engine->call<ITestIM::setHandler>(nullptr);
+    } else if (scenario == "translated-command") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.expect("keyboard-us");
+        // XKB keycode 38 produces q on French AZERTY and a on US QWERTY.
+        const Key azertyQ(FcitxKey_q, KeyStates{}, 38);
+        frontend->call<ITestFrontend::pushCommitExpectation>("a");
+        client.context()->setBlockEventToClient(true);
+        require(client.key(azertyQ), "the original q reached the client");
+        client.expect("test-primary");
+        client.context()->setBlockEventToClient(false);
+        client.key(azertyQ, true);
+        require(!client.key(azertyQ), "the next q missed the restored layout");
+    } else if (scenario == "scroll-restore") {
+        client.select("test-secondary");
+        client.pass(FcitxKey_Escape);
+        require(!client.key(Key(FcitxKey_d, KeyState::Ctrl)),
+                "Ctrl+D was consumed");
+        client.pass(FcitxKey_z);
+        client.pass(FcitxKey_z);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_i);
+        client.expect("test-secondary");
+    } else if (scenario == "command-line-restore") {
+        client.select("test-primary");
+        client.pass(FcitxKey_Escape);
+        client.pass(FcitxKey_colon);
+        client.pass(FcitxKey_BackSpace);
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
+        client.pass(FcitxKey_Escape);
+        for (char c : std::string_view(":%s/x/y/gc")) {
+            client.pass(static_cast<KeySym>(c));
+        }
+        client.pass(FcitxKey_Return);
+        client.pass(FcitxKey_a);
+        client.expect("keyboard-us");
+        client.pass(FcitxKey_i);
+        client.expect("test-primary");
     } else if (scenario == "consumed-escape") {
         bool candidateOpen = true;
         engine->call<ITestIM::setHandler>([&](const auto &, KeyEvent &event) {

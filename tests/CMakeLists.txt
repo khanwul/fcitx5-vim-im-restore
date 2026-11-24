@@ -17,7 +17,8 @@ foreach(role primary secondary command)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/inputmethod/test-${role}.conf"
         "[InputMethod]\nName=Test ${role}\nLangCode=und\nAddon=testim\n")
 endforeach()
-foreach(scenario IN ITEMS switching consumed-escape overrides contexts)
+foreach(scenario IN ITEMS switching translated-command scroll-restore
+                          command-line-restore consumed-escape overrides contexts)
     add_test(NAME "frontend-${scenario}" COMMAND test-integration
              "${scenario}" "$<TARGET_FILE_DIR:viescape>"
              "${PROJECT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")

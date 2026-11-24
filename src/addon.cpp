@@ -5,6 +5,7 @@
 #include <fcitx/addonmanager.h>
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/instance.h>
+#include <utility>
 
 namespace {
 using namespace fcitx;
@@ -22,9 +23,11 @@ public:
 struct ContextState final : InputContextProperty {
     std::string saved;
     viescape::Commands commands;
+    char pendingCommit = 0;
     void clear() {
         saved.clear();
         commands = {};
+        pendingCommit = 0;
     }
 };
 
@@ -36,6 +39,16 @@ public:
         readAsIni(settings_, configPath);
         result_ = instance_.connect<Instance::KeyEventResult>(
             [this](const KeyEvent &event) { handleKey(event); });
+        commit_ = instance_.connect<Instance::CommitFilter>(
+            [this](InputContext *ic, const std::string &text) {
+                auto *state = ic->propertyFor(&factory_);
+                const char expected = std::exchange(state->pendingCommit, 0);
+                if (expected && text.size() == 1 && text.front() == expected &&
+                    ic->hasFocus() &&
+                    instance_.inputMethod(ic) == *settings_.english) {
+                    restore(ic, *state);
+                }
+            });
         switched_ =
             instance_.watchEvent<EventType::InputContextSwitchInputMethod>(
                 EventWatcherPhase::PostInputMethod, [this](const auto &event) {
@@ -74,15 +87,21 @@ private:
                programs.end();
     }
 
+    void restore(InputContext *ic, ContextState &state) {
+        const auto saved = state.saved;
+        state.clear();
+        instance_.setCurrentInputMethod(ic, saved, true);
+    }
+
     void handleKey(const KeyEvent &event) {
         auto *ic = event.inputContext();
+        auto *state = ic->propertyFor(&factory_);
+        state->pendingCommit = 0;
         if (event.isRelease() || event.accepted() || event.filtered() ||
             !ic->hasFocus() || excluded(ic)) {
             return;
         }
         // This signal runs after the active engine's keyEvent and filterKey.
-        // The frontend still delivers the original unconsumed command once.
-        auto *state = ic->propertyFor(&factory_);
         const auto key = event.key();
         if (key.check(FcitxKey_Escape)) {
             state->commands = {};
@@ -102,9 +121,14 @@ private:
             if (instance_.inputMethod(ic) != *settings_.english) {
                 state->clear();
             } else if (state->commands.entersInsert(key)) {
-                const auto restore = state->saved;
-                state->clear();
-                instance_.setCurrentInputMethod(ic, restore, true);
+                // Fcitx uses the active layout again after KeyEventResult to
+                // commit a translated character. Switch once it has that text.
+                if (event.forward() &&
+                    event.rawKey().sym() != event.origKey().sym()) {
+                    state->pendingCommit = static_cast<char>(key.sym());
+                } else {
+                    restore(ic, *state);
+                }
             }
         }
     }
@@ -113,6 +137,7 @@ private:
     Settings settings_;
     SimpleInputContextPropertyFactory<ContextState> factory_;
     ScopedConnection result_;
+    ScopedConnection commit_;
     std::unique_ptr<HandlerTableEntry<EventHandler>> switched_;
 };
 
